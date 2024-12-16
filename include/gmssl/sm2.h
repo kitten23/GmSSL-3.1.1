@@ -355,6 +355,16 @@ typedef struct {
 int sm2_do_encrypt(const SM2_KEY *key, const uint8_t *in, size_t inlen, SM2_CIPHERTEXT *out);
 int sm2_do_decrypt(const SM2_KEY *key, const SM2_CIPHERTEXT *in, uint8_t *out, size_t *outlen);
 
+typedef struct {
+	SM2_POINT* point;
+	uint8_t* hash;
+	uint8_t* cipher;
+	size_t cipher_len;
+} SM2_CIPHER;
+
+int sm2_do_encrypt2(const SM2_KEY *key, const uint8_t *in, size_t inlen, SM2_CIPHER *out);
+int sm2_do_decrypt2(const SM2_KEY *key, const SM2_CIPHER *in, uint8_t *out, size_t *outlen);
+
 #define SM2_MIN_CIPHERTEXT_SIZE	 45 // depends on SM2_MIN_PLAINTEXT_SIZE
 #define SM2_MAX_CIPHERTEXT_SIZE	366 // depends on SM2_MAX_PLAINTEXT_SIZE
 int sm2_ciphertext_to_der(const SM2_CIPHERTEXT *c, uint8_t **out, size_t *outlen);

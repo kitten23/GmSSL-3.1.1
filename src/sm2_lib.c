@@ -548,6 +548,69 @@ retry:
 	return 1;
 }
 
+int sm2_do_encrypt2(const SM2_KEY *key, const uint8_t *in, size_t inlen, SM2_CIPHER *out)
+{
+	SM2_BN k;
+	SM2_JACOBIAN_POINT _P, *P = &_P;
+	SM2_JACOBIAN_POINT _C1, *C1 = &_C1;
+	SM2_JACOBIAN_POINT _kP, *kP = &_kP;
+	uint8_t x2y2[64];
+	SM3_CTX sm3_ctx;
+
+	if (SM2_MIN_PLAINTEXT_SIZE > inlen) {
+		error_print();
+		return -1;
+	}
+
+	sm2_jacobian_point_from_bytes(P, (uint8_t *)&key->public_key);
+
+	// S = h * P, check S != O
+	// for sm2 curve, h == 1 and S == P
+	// SM2_POINT can not present point at infinity, do do nothing here
+
+retry:
+	// rand k in [1, n - 1]
+	do {
+		if (sm2_fn_rand(k) != 1) {
+			error_print();
+			return -1;
+		}
+	} while (sm2_bn_is_zero(k));	//sm2_bn_print(stderr, 0, 4, "k", k);
+
+	// output C1 = k * G = (x1, y1)
+	sm2_jacobian_point_mul_generator(C1, k);
+	sm2_jacobian_point_to_bytes(C1, (uint8_t *)out->point);
+
+	// k * P = (x2, y2)
+	sm2_jacobian_point_mul(kP, k, P);
+	sm2_jacobian_point_to_bytes(kP, x2y2);
+
+	// t = KDF(x2 || y2, inlen)
+	sm2_kdf(x2y2, 64, inlen, out->cipher);
+
+	// if t is all zero, retry
+	if (all_zero(out->cipher, inlen)) {
+		goto retry;
+	}
+
+	// output C2 = M xor t
+	gmssl_memxor(out->cipher, out->cipher, in, inlen);
+	out->cipher_len = inlen;
+
+	// output C3 = Hash(x2 || m || y2)
+	sm3_init(&sm3_ctx);
+	sm3_update(&sm3_ctx, x2y2, 32);
+	sm3_update(&sm3_ctx, in, inlen);
+	sm3_update(&sm3_ctx, x2y2 + 32, 32);
+	sm3_finish(&sm3_ctx, out->hash);
+
+	gmssl_secure_clear(k, sizeof(k));
+	gmssl_secure_clear(kP, sizeof(SM2_JACOBIAN_POINT));
+	gmssl_secure_clear(x2y2, sizeof(x2y2));
+	return 1;
+}
+
+
 int sm2_do_encrypt_fixlen(const SM2_KEY *key, const uint8_t *in, size_t inlen, int point_size, SM2_CIPHERTEXT *out)
 {
 	unsigned int trys = 200;
@@ -675,6 +738,62 @@ int sm2_do_decrypt(const SM2_KEY *key, const SM2_CIPHERTEXT *in, uint8_t *out, s
 	sm3_init(&sm3_ctx);
 	sm3_update(&sm3_ctx, x2y2, 32);
 	sm3_update(&sm3_ctx, out, in->ciphertext_size);
+	sm3_update(&sm3_ctx, x2y2 + 32, 32);
+	sm3_finish(&sm3_ctx, hash);
+
+	// check if u == C3
+	if (memcmp(in->hash, hash, sizeof(hash)) != 0) {
+		error_print();
+		goto end;
+	}
+	ret = 1;
+
+end:
+	gmssl_secure_clear(d, sizeof(d));
+	gmssl_secure_clear(C1, sizeof(SM2_JACOBIAN_POINT));
+	gmssl_secure_clear(x2y2, sizeof(x2y2));
+	return ret;
+}
+
+int sm2_do_decrypt2(const SM2_KEY *key, const SM2_CIPHER *in, uint8_t *out, size_t *outlen)
+{
+	int ret = -1;
+	SM2_BN d;
+	SM2_JACOBIAN_POINT _C1, *C1 = &_C1;
+	uint8_t x2y2[64];
+	SM3_CTX sm3_ctx;
+	uint8_t hash[32];
+
+	// check C1 is on sm2 curve
+	sm2_jacobian_point_from_bytes(C1, (uint8_t *)in->point);
+	if (!sm2_jacobian_point_is_on_curve(C1)) {
+		error_print();
+		return -1;
+	}
+
+	// check if S = h * C1 is point at infinity
+	// this will not happen, as SM2_POINT can not present point at infinity
+
+	// d * C1 = (x2, y2)
+	sm2_bn_from_bytes(d, key->private_key);
+	sm2_jacobian_point_mul(C1, d, C1);
+
+	// t = KDF(x2 || y2, klen) and check t is not all zeros
+	sm2_jacobian_point_to_bytes(C1, x2y2);
+	sm2_kdf(x2y2, 64, in->cipher_len, out);
+	if (all_zero(out, in->cipher_len)) {
+		error_print();
+		goto end;
+	}
+
+	// M = C2 xor t
+	gmssl_memxor(out, out, in->cipher, in->cipher_len);
+	*outlen = in->cipher_len;
+
+	// u = Hash(x2 || M || y2)
+	sm3_init(&sm3_ctx);
+	sm3_update(&sm3_ctx, x2y2, 32);
+	sm3_update(&sm3_ctx, out, in->cipher_len);
 	sm3_update(&sm3_ctx, x2y2 + 32, 32);
 	sm3_finish(&sm3_ctx, hash);
 
